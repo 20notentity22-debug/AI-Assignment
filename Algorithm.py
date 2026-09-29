@@ -1,232 +1,272 @@
-import logic 
-import random
+"""Threat-aware Gomoku search with alpha-beta pruning."""
+import logic
 
-#Constants and configuration
 BOARD_SIZE = 15
-Empty = 0
-Black = 1
-White = 2
+Empty, Black, White = 0, 1, 2
+SEARCH_RADIUS = 1
+MAX_CANDIDATES = 8
+WIN_SCORE = 10_000_000
 
-# Search radius around existing pieces
-SEARCH_RADIUS = 2 
-
-# Evaluation scores (higher = better)
-SCORES = {
-    "five": 10000000,      # Five in a row (win)
-    "live_four": 100000,   # Open four
-    "four_with_gap": 10000, # Four with one gap
-    "live_three": 1000,    # Open three
-    "three_with_gap": 100,  # Three with one gap
-    "live_two": 10,        # Open two
-    "two_with_gap": 1      # Two with one gap
-}
-    
 class SearchStopped(Exception):
-    #Exception raised when search is cancelled externally
-    pass
+    """Raised when a search is cancelled by the UI."""
 
-# --- Board evaluation: core of AI strength ---
 
-def evaluate_board(board, player):
-    #Evaluate board advantage for given player
-    score = 0
-    opponent = White if player == Black else Black
-    
-    # Player score minus opponent score
-    score += evaluate_player(board, player)
-    score -= evaluate_player(board, opponent)
-    
-    return score
+def _opponent(player):
+    return White if player == Black else Black
 
-def evaluate_player(board, player):
-    #Calculate pattern scores for a player
-    score = 0
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            if board[r][c] == player:
-                score += check_patterns(board, r, c, player)
-    return score
 
-def check_patterns(board, r, c, player):
-    #Check patterns around a position in all directions
-    directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
-    total = 0
-    for dr, dc in directions:
-        line = get_line_pattern(board, r, c, dr, dc, player)
-        total += pattern_to_score(line)
-    return total
-
-def get_line_pattern(board, r, c, dr, dc, player):
-    #Get pattern string along a direction
-    pattern = []
-    for i in range(-4, 5):
-        nr = r + dr * i
-        nc = c + dc * i
-        if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE:
-            if board[nr][nc] == player:
-                pattern.append(1)  # Player piece
-            elif board[nr][nc] == Empty:
-                pattern.append(0)  # Empty
-            else:
-                pattern.append(2)  # Opponent piece
-        else:
-            pattern.append(3)  # Board edge
-    return pattern
-
-def pattern_to_score(pattern):
-    #Convert pattern to score using SCORES dictionary
-    s = ''.join(map(str, pattern))
-    
-    # Identify highest scoring patterns
-    if '11111' in s: return SCORES["five"]
-    if '011110' in s: return SCORES["live_four"]
-
-    # Four with gap
-    is_four_with_gap = ('01111' in s or '11110' in s or '10111' in s or '11011' in s or '11101' in s)
-    if is_four_with_gap:
-         # Simplified boundary check
-         if ('01111' in s and '2' in s) or ('11110' in s and '2' in s) or \
-            ('01111' in s and '3' in s) or ('11110' in s and '3' in s):
-            return SCORES["four_with_gap"]
-    
-    if '01110' in s: return SCORES["live_three"]
-        
-    # Three with gap
-    if '01112' in s or '21110' in s or '01113' in s or '31110' in s or \
-       '1011' in s or '1101' in s or '010110' in s:
-        return SCORES["three_with_gap"]
-        
-    if '0110' in s: return SCORES["live_two"]
-        
-    if '0112' in s or '2110' in s or '0113' in s or '3110' in s:
-        return SCORES["two_with_gap"]
-    
-    return 0
-
-def is_game_over(board):
-    #Check if game has ended (win or draw)
-    # Check for winner
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            if board[r][c] != Empty:
-                if logic.check_win(board, r, c, board[r][c]):
-                    return True
-    
-    # Check for draw (full board)
-    if logic.is_board_full(board):
-        return True
-        
-    return False
-
-#Optimization: limit search area
-
-def generate_candidate_moves(board):
-    
-    #Generate candidate moves only around existing pieces
-    #Key optimization to reduce search space
-    
-    candidate_moves = set()
-    has_piece = False
-    
-    for r in range(BOARD_SIZE):
-        for c in range(BOARD_SIZE):
-            if board[r][c] != Empty:
-                has_piece = True
-                # Check surrounding SEARCH_RADIUS
-                for dr in range(-SEARCH_RADIUS, SEARCH_RADIUS + 1):
-                    for dc in range(-SEARCH_RADIUS, SEARCH_RADIUS + 1):
-                        nr, nc = r + dr, c + dc
-                        
-                        if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE and board[nr][nc] == Empty:
-                            candidate_moves.add((nr, nc))
-                            
-    # If board empty, start from center
-    if not has_piece:
-        return [(BOARD_SIZE // 2, BOARD_SIZE // 2)]
-
-    return list(candidate_moves)
-
-# --- Minimax with Alpha-Beta pruning ---
-
-def minimax(board, depth, is_maximizing, alpha, beta, player, stop_event=None):
-    
-    #Minimax algorithm with Alpha-Beta pruning
-    
-    # Cooperative cancellation
+def _check_cancel(stop_event):
     if stop_event is not None and stop_event.is_set():
         raise SearchStopped()
 
-    # Terminal conditions
-    if depth == 0 or is_game_over(board):
+
+def _windows(board):
+    """Yield all five-cell horizontal, vertical, and diagonal windows."""
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+                er, ec = r + 4 * dr, c + 4 * dc
+                if 0 <= er < BOARD_SIZE and 0 <= ec < BOARD_SIZE:
+                    yield [(r + i * dr, c + i * dc) for i in range(5)]
+
+
+def _window_score(count, open_ends):
+    if count == 5:
+        return WIN_SCORE
+    if count == 4:
+        return 120_000 if open_ends == 2 else 18_000 if open_ends == 1 else 0
+    if count == 3:
+        return 30_000 if open_ends == 2 else 350 if open_ends == 1 else 0
+    if count == 2:
+        return 100 if open_ends == 2 else 10 if open_ends == 1 else 0
+    return 1 if count == 1 and open_ends == 2 else 0
+
+
+def evaluate_player(board, player):
+    """Score unblocked five-cell threats, including broken patterns."""
+    total = 0
+    for cells in _windows(board):
+        values = [board[r][c] for r, c in cells]
+        if _opponent(player) in values:
+            continue
+        count = values.count(player)
+        if not count:
+            continue
+        # Count the cells immediately beyond this window as open ends.
+        r, c = cells[0]
+        er, ec = cells[-1]
+        open_ends = 0
+        dr, dc = cells[1][0] - r, cells[1][1] - c
+        for nr, nc in ((r - dr, c - dc), (er + dr, ec + dc)):
+            if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE and board[nr][nc] == Empty:
+                open_ends += 1
+        total += _window_score(count, open_ends)
+    return total
+
+
+def evaluate_board(board, player):
+    opponent = _opponent(player)
+    return evaluate_player(board, player) - int(evaluate_player(board, opponent) * 1.08)
+
+
+def is_game_over(board):
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            if board[r][c] and logic.check_win(board, r, c, board[r][c]):
+                return True
+    return logic.is_board_full(board)
+
+
+def generate_candidate_moves(board):
+    moves = set()
+    has_piece = False
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            if board[r][c] == Empty:
+                continue
+            has_piece = True
+            for dr in range(-SEARCH_RADIUS, SEARCH_RADIUS + 1):
+                for dc in range(-SEARCH_RADIUS, SEARCH_RADIUS + 1):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE and board[nr][nc] == Empty:
+                        moves.add((nr, nc))
+    if not has_piece:
+        return [(BOARD_SIZE // 2, BOARD_SIZE // 2)]
+    return list(moves)
+
+
+def _ordered_moves(board, moves, player, perspective, stop_event):
+    opponent = _opponent(player)
+    scored = []
+    for r, c in moves:
+        _check_cancel(stop_event)
+        board[r][c] = player
+        win = logic.check_win(board, r, c, player)
+        own_score = evaluate_board(board, perspective)
+        board[r][c] = opponent
+        blocks_win = logic.check_win(board, r, c, opponent)
+        board[r][c] = Empty
+        score = (WIN_SCORE * 2 if win else 0) + (WIN_SCORE if blocks_win else 0) + own_score
+        scored.append((score, (r, c)))
+    scored.sort(reverse=True)
+    return [move for _, move in scored[:MAX_CANDIDATES]]
+
+
+def minimax(board, depth, is_maximizing, alpha, beta, player, stop_event=None):
+    _check_cancel(stop_event)
+    if depth <= 0:
         return evaluate_board(board, player)
 
-    current_player = player if is_maximizing else (White if player == Black else Black)
-    candidate_moves = generate_candidate_moves(board)
+    current = player if is_maximizing else _opponent(player)
+    moves = _ordered_moves(board, generate_candidate_moves(board), current, player, stop_event)
+    if not moves:
+        return evaluate_board(board, player)
 
-    # Move ordering: sort by quick evaluation
-    scored_moves = []
-    for r, c in candidate_moves:
-        board[r][c] = current_player
-        score = evaluate_board(board, player) 
-        board[r][c] = Empty
-        scored_moves.append((score, r, c))
-
-    if is_maximizing:
-        best_score = -float('inf')
-        scored_moves.sort(key=lambda x: x[0], reverse=True)  # High scores first
-    else:
-        best_score = float('inf')
-        scored_moves.sort(key=lambda x: x[0])  # Low scores first
-    
-    # Traverse and recurse
-    for score_ignored, r, c in scored_moves:
-        # Check cancellation before each move
-        if stop_event is not None and stop_event.is_set():
-            raise SearchStopped()
-        board[r][c] = current_player
-        score = minimax(board, depth - 1, not is_maximizing, alpha, beta, player, stop_event=stop_event)
-        board[r][c] = Empty
-        
+    best = -float('inf') if is_maximizing else float('inf')
+    for r, c in moves:
+        _check_cancel(stop_event)
+        board[r][c] = current
+        try:
+            if logic.check_win(board, r, c, current):
+                score = (WIN_SCORE + depth) if current == player else (-WIN_SCORE - depth)
+            elif depth == 1:
+                score = evaluate_board(board, player)
+            else:
+                score = minimax(board, depth - 1, not is_maximizing, alpha, beta, player, stop_event)
+        finally:
+            board[r][c] = Empty
         if is_maximizing:
-            best_score = max(best_score, score)
-            alpha = max(alpha, best_score)
-            if best_score >= beta:
-                break  # Beta cut-off
+            best = max(best, score)
+            alpha = max(alpha, best)
         else:
-            best_score = min(best_score, score)
-            beta = min(beta, best_score)
-            if best_score <= alpha:
-                break  # Alpha cut-off
-    
-    return best_score
+            best = min(best, score)
+            beta = min(beta, best)
+        if beta <= alpha:
+            break
+    return best
+
 
 def find_best_move(board, player, max_depth=3, stop_event=None):
-    
-    #Find best move for AI player
-    #Main decision function
-    
-    best_score = -float('inf')
-    best_move = None
-    
-    candidate_moves = generate_candidate_moves(board)
-    
-    # Evaluate all candidate moves
-    for r, c in candidate_moves:
+    """Find a strong move, always taking wins and preventing immediate losses."""
+    try:
+        moves = generate_candidate_moves(board)
+        if not moves:
+            return None
+        opponent = _opponent(player)
+
+        # Resolve immediate tactical moves before spending time on search.
+        for r, c in moves:
+            _check_cancel(stop_event)
+            board[r][c] = player
+            won = logic.check_win(board, r, c, player)
+            board[r][c] = Empty
+            if won:
+                return (r, c)
+
+        # An unblocked run of three must be interrupted before it grows into
+        # a four, unless the AI has a verified forced win on its next turn.
+        open_three_blocks = _open_three_blocks(board, opponent)
+        if open_three_blocks and not _has_forced_win_in_two(board, player, stop_event):
+            moves = [move for move in moves if move in open_three_blocks]
+            if not moves:
+                # A nearby defensive move can still disrupt a broken/open threat.
+                moves = generate_candidate_moves(board)
+        for r, c in moves:
+            _check_cancel(stop_event)
+            board[r][c] = opponent
+            threat = logic.check_win(board, r, c, opponent)
+            board[r][c] = Empty
+            if threat:
+                # Several winning squares cannot all be blocked; choose the best available defense.
+                break
+        else:
+            threat = False
+        if threat:
+            moves = [(r, c) for r, c in moves if _blocks_threat(board, r, c, opponent)]
+
+        best_move, best_score = None, -float('inf')
+        moves = _ordered_moves(board, moves, player, player, stop_event)
+        for r, c in moves:
+            _check_cancel(stop_event)
+            board[r][c] = player
+            try:
+                if logic.check_win(board, r, c, player):
+                    score = WIN_SCORE
+                else:
+                    score = minimax(board, max(0, max_depth - 1), False,
+                                    -float('inf'), float('inf'), player, stop_event)
+            finally:
+                board[r][c] = Empty
+            if score > best_score:
+                best_score, best_move = score, (r, c)
+        return best_move
+    except SearchStopped:
+        return None
+
+
+def _blocks_threat(board, r, c, opponent):
+    """A candidate blocks a win if it occupies one of the opponent's winning cells."""
+    board[r][c] = opponent
+    result = logic.check_win(board, r, c, opponent)
+    board[r][c] = Empty
+    return result
+
+
+def _open_three_blocks(board, player):
+    """Return endpoints of contiguous threes that have two open ends."""
+    blocks = set()
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+                cells = [(r + i * dr, c + i * dc) for i in range(3)]
+                er, ec = cells[-1]
+                before, after = (r - dr, c - dc), (er + dr, ec + dc)
+                if not all(0 <= rr < BOARD_SIZE and 0 <= cc < BOARD_SIZE
+                           for rr, cc in (*cells, before, after)):
+                    continue
+                if (all(board[rr][cc] == player for rr, cc in cells)
+                        and board[before[0]][before[1]] == Empty
+                        and board[after[0]][after[1]] == Empty):
+                    blocks.add(before)
+                    blocks.add(after)
+    return blocks
+
+
+def _has_forced_win_in_two(board, player, stop_event):
+    """Check whether every opponent reply still allows an immediate AI win."""
+    opponent = _opponent(player)
+    candidates = _ordered_moves(board, generate_candidate_moves(board), player, player, stop_event)
+    for r, c in candidates[:MAX_CANDIDATES]:
+        _check_cancel(stop_event)
         board[r][c] = player
         try:
-            score = minimax(board, max_depth - 1, False, -float('inf'), float('inf'), player, stop_event=stop_event)
-        except SearchStopped:
-            # Search cancelled, return None
-            return None
-
-        board[r][c] = Empty  # Undo move
-        
-        if score > best_score:
-            best_score = score
-            best_move = (r, c)
-            
-    # Safety: return first move if none found
-    if best_move is None and len(candidate_moves) > 0:
-         return candidate_moves[0]
-            
-    return best_move
+            if logic.check_win(board, r, c, player):
+                return True
+            replies = generate_candidate_moves(board)
+            forced = bool(replies)
+            for rr, cc in replies:
+                _check_cancel(stop_event)
+                board[rr][cc] = opponent
+                try:
+                    if logic.check_win(board, rr, cc, opponent):
+                        forced = False
+                        break
+                    wins_next = False
+                    for ar, ac in generate_candidate_moves(board):
+                        board[ar][ac] = player
+                        try:
+                            wins_next = logic.check_win(board, ar, ac, player)
+                        finally:
+                            board[ar][ac] = Empty
+                        if wins_next:
+                            break
+                    if not wins_next:
+                        forced = False
+                        break
+                finally:
+                    board[rr][cc] = Empty
+            if forced:
+                return True
+        finally:
+            board[r][c] = Empty
+    return False

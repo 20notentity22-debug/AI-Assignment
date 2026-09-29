@@ -3,7 +3,6 @@ import Algorithm as Algo
 import logic 
 from tkinter import messagebox
 import threading
-from PIL import Image, ImageTk
 
 # Constants
 BOARD_SIZE = 15
@@ -49,21 +48,12 @@ def draw_board():
     except Exception:
         pass
     
-    # Draw grid lines
-    for i in range(BOARD_SIZE):
-        # Horizontal lines
-        start_x = MARGIN
-        start_y = MARGIN + i * CELL_SIZE
-        end_x = MARGIN + (BOARD_SIZE - 1) * CELL_SIZE
-        end_y = start_y
-        canvas.create_line(start_x, start_y, end_x, end_y)
-        
-        # Vertical lines
-        start_x = MARGIN + i * CELL_SIZE
-        start_y = MARGIN
-        end_x = start_x
-        end_y = MARGIN + (BOARD_SIZE - 1) * CELL_SIZE
-        canvas.create_line(start_x, start_y, end_x, end_y)
+    # The board image includes the grid; retain a simple fallback if it fails to load.
+    if bg_photo is None:
+        for i in range(BOARD_SIZE):
+            pos = MARGIN + i * CELL_SIZE
+            canvas.create_line(MARGIN, pos, MARGIN + (BOARD_SIZE - 1) * CELL_SIZE, pos)
+            canvas.create_line(pos, MARGIN, pos, MARGIN + (BOARD_SIZE - 1) * CELL_SIZE)
 
     # Draw pieces
     r_offset = CELL_SIZE * 0.4
@@ -361,11 +351,9 @@ def start_gui():
     canvas.pack()
     canvas.focus_set()
     
-    # Try to load background image
+    # Load the wooden Gomoku board image, including grid and star points.
     try:
-        img = Image.open('mmexport1765254795139_edit_70690453677752.jpg')
-        img = img.resize((WINDOW_SIZE, WINDOW_SIZE), Image.LANCZOS)
-        bg_photo = ImageTk.PhotoImage(img)
+        bg_photo = tk.PhotoImage(file='gomoku_board.ppm')
         canvas.bg_photo = bg_photo
     except Exception:
         bg_photo = None
